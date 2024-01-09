@@ -5,10 +5,10 @@ from typing import List, Dict
 from tensorflow.keras.layers import LSTM
 import numpy as np
 import sys
-
+from LSTM import CustomLSTM
 
 class KGCN(object):
-    def __init__(self, args, n_user: int, n_entity: int, n_relation: int, adj_entity: List[List[int]], adj_relation: List[List[int]], time_stamps: int):
+    def __init__(self, args, n_user: int, n_entity: int, n_relation: int, adj_entity: List[List[int]], adj_relation: List[List[int]]):
         """
         #! Neighbours are chosen once and don't change.
         
@@ -22,8 +22,9 @@ class KGCN(object):
             time_stamps (int): How far into the past the model sees
         """
         self._parse_args(args, adj_entity, adj_relation)
-        self.time_stamps = time_stamps
-        self.LSTM = LSTM(self.dim)
+
+        self.lstm = CustomLSTM(input_size=self.dim, hidden_size=self.dim)
+
         self._build_inputs()
         self._build_model(n_user, n_entity, n_relation)
         self._build_train()
@@ -37,6 +38,7 @@ class KGCN(object):
         self.adj_entity = adj_entity
         self.adj_relation = adj_relation
 
+        self.time_stamps = args.time_stamps
         self.n_iter = args.n_iter
         self.batch_size = args.batch_size
         self.n_neighbor = args.neighbor_sample_size
@@ -82,11 +84,6 @@ class KGCN(object):
 
         #! Forward pass through the network
 
-        # entities is a list of i-iter (i = 0, 1, ..., n_iter) neighbors for the batch of items
-        # dimensions of entities:
-        # {[batch_size, 1], [batch_size, n_neighbor], [batch_size, n_neighbor^2], ..., [batch_size, n_neighbor^n_iter]}
-        
-
         history_embeddings = []
 
         # [time_stamp, batch]
@@ -95,10 +92,11 @@ class KGCN(object):
         for i in range(self.time_stamps):
 
             batch = history[i]
-            entities, relations = self.get_neighbors(batch)
 
-            print(len(entities))
-            print(len(relations))
+            # entities is a list of i-iter (i = 0, 1, ..., n_iter) neighbors for the batch of items
+            # dimensions of entities:
+            # {[batch_size, 1], [batch_size, n_neighbor], [batch_size, n_neighbor^2], ..., [batch_size, n_neighbor^n_iter]}
+            entities, relations = self.get_neighbors(batch)
 
             # [batch_size, dim]
             self.item_embeddings, self.aggregators = self.aggregate(entities, relations)
@@ -110,17 +108,16 @@ class KGCN(object):
 
         # [batch_size, time_steps, dim]
         stacked_embeddings = tf.transpose(stacked_embeddings, perm=[1, 0, 2])
+        
+        lstm_output = self.lstm(stacked_embeddings)
 
-        # [batch_size, dim]
-        self.lstm_output = self.LSTM(stacked_embeddings)
-
-        # [batch_size, ]
-        self.scores = tf.reduce_sum(self.user_embeddings * self.lstm_output, axis=1)
+        self.scores = tf.reduce_sum(self.user_embeddings * lstm_output, axis=1)
+        print(self.scores.shape)
         self.scores_normalized = tf.sigmoid(self.scores)
 
     def get_neighbors(self, seeds):
-        entities = [seeds]
         seeds = tf.expand_dims(seeds, axis=1)
+        entities = [seeds]
         relations = []
         for i in range(self.n_iter):
             neighbor_entities = tf.reshape(tf.gather(self.adj_entity, entities[i]), [self.batch_size, -1])
@@ -151,7 +148,7 @@ class KGCN(object):
                 entity_vectors_next_iter.append(vector)
             entity_vectors = entity_vectors_next_iter
 
-        res = tf.reshape(entity_vectors[0], [self.batch_size, self.dim])
+            res = tf.reshape(entity_vectors[0], [self.batch_size, self.dim])
 
         return res, aggregators
 
@@ -165,12 +162,15 @@ class KGCN(object):
         self.l2_loss = tf.nn.l2_loss(self.user_emb_matrix) + tf.nn.l2_loss(
             self.entity_emb_matrix) + tf.nn.l2_loss(self.relation_emb_matrix)
         
+        lstm_weights = self.lstm.trainable_weights
+        lstm_l2_loss = tf.add_n([tf.nn.l2_loss(w) for w in lstm_weights])
+
         # L2-loss for the aggregator weights
         for aggregator in self.aggregators:
             self.l2_loss = self.l2_loss + tf.nn.l2_loss(aggregator.weights)
 
         #. Final loss function
-        self.loss = self.base_loss + self.l2_weight * self.l2_loss
+        self.loss = self.base_loss + self.l2_weight * self.l2_loss + lstm_l2_loss
 
         self.optimizer = tf.compat.v1.train.AdamOptimizer(self.lr).minimize(self.loss)
 
