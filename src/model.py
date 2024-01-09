@@ -1,10 +1,22 @@
 import tensorflow as tf
 from aggregators import SumAggregator, ConcatAggregator, NeighborAggregator
 from sklearn.metrics import f1_score, roc_auc_score
+from typing import List, Dict
 
 
 class KGCN(object):
-    def __init__(self, args, n_user, n_entity, n_relation, adj_entity, adj_relation):
+    def __init__(self, args, n_user: int, n_entity: int, n_relation: int, adj_entity: List[List[int]], adj_relation: List[List[int]]):
+        """
+        #! Neighbours are chosen once and don't change.
+        
+        Args:
+            args (_type_): Input arguments
+            n_user (int): number of users
+            n_entity (int): number of entities
+            n_relation (int): numer of relations
+            adj_entity (List[List[int]]): shape = [n_entity, neighbor_sample_size]
+            adj_relation (List[List[int]]): shape = [n_relation, neighbor_sample_size]
+        """
         self._parse_args(args, adj_entity, adj_relation)
         self._build_inputs()
         self._build_model(n_user, n_entity, n_relation)
@@ -35,19 +47,24 @@ class KGCN(object):
             raise Exception("Unknown aggregator: " + args.aggregator)
 
     def _build_inputs(self):
+        #. Received in every pass through the feed_dict
         self.user_indices = tf.placeholder(dtype=tf.int64, shape=[None], name='user_indices')
         self.item_indices = tf.placeholder(dtype=tf.int64, shape=[None], name='item_indices')
         self.labels = tf.placeholder(dtype=tf.float32, shape=[None], name='labels')
 
-    def _build_model(self, n_user, n_entity, n_relation):
+    def _build_model(self, n_user: int, n_entity: int, n_relation: int):
+
+        #. Embedding for every single user of size self.dim
         self.user_emb_matrix = tf.get_variable(
             shape=[n_user, self.dim], initializer=KGCN.get_initializer(), name='user_emb_matrix')
+        #. Embedding for every single entity of size self.dim
         self.entity_emb_matrix = tf.get_variable(
             shape=[n_entity, self.dim], initializer=KGCN.get_initializer(), name='entity_emb_matrix')
+        #. Embedding for every single relation of size self.dim
         self.relation_emb_matrix = tf.get_variable(
             shape=[n_relation, self.dim], initializer=KGCN.get_initializer(), name='relation_emb_matrix')
 
-        # [batch_size, dim]
+        #. Embeddings for every user in the batch [batch_size, dim]
         self.user_embeddings = tf.nn.embedding_lookup(self.user_emb_matrix, self.user_indices)
 
         # entities is a list of i-iter (i = 0, 1, ..., n_iter) neighbors for the batch of items
@@ -63,6 +80,7 @@ class KGCN(object):
         self.scores_normalized = tf.sigmoid(self.scores)
 
     def get_neighbors(self, seeds):
+        print(seeds.shape)
         seeds = tf.expand_dims(seeds, axis=1)
         entities = [seeds]
         relations = []
@@ -100,21 +118,28 @@ class KGCN(object):
         return res, aggregators
 
     def _build_train(self):
+
+        #. Cross-entropy between labels and scores
         self.base_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
             labels=self.labels, logits=self.scores))
 
+        #. L2-loss for the embeddings
         self.l2_loss = tf.nn.l2_loss(self.user_emb_matrix) + tf.nn.l2_loss(
             self.entity_emb_matrix) + tf.nn.l2_loss(self.relation_emb_matrix)
+        
+        # L2-loss for the aggregator weights
         for aggregator in self.aggregators:
             self.l2_loss = self.l2_loss + tf.nn.l2_loss(aggregator.weights)
+
+        #. Final loss function
         self.loss = self.base_loss + self.l2_weight * self.l2_loss
 
         self.optimizer = tf.train.AdamOptimizer(self.lr).minimize(self.loss)
 
-    def train(self, sess, feed_dict):
+    def train(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         return sess.run([self.optimizer, self.loss], feed_dict)
 
-    def eval(self, sess, feed_dict):
+    def eval(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         labels, scores = sess.run([self.labels, self.scores_normalized], feed_dict)
         auc = roc_auc_score(y_true=labels, y_score=scores)
         scores[scores >= 0.5] = 1
@@ -122,5 +147,5 @@ class KGCN(object):
         f1 = f1_score(y_true=labels, y_pred=scores)
         return auc, f1
 
-    def get_scores(self, sess, feed_dict):
+    def get_scores(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         return sess.run([self.item_indices, self.scores_normalized], feed_dict)
