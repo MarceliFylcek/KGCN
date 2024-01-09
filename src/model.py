@@ -2,10 +2,13 @@ import tensorflow as tf
 from aggregators import SumAggregator, ConcatAggregator, NeighborAggregator
 from sklearn.metrics import f1_score, roc_auc_score
 from typing import List, Dict
+from tensorflow.keras.layers import LSTM
+import numpy as np
+import sys
 
 
 class KGCN(object):
-    def __init__(self, args, n_user: int, n_entity: int, n_relation: int, adj_entity: List[List[int]], adj_relation: List[List[int]]):
+    def __init__(self, args, n_user: int, n_entity: int, n_relation: int, adj_entity: List[List[int]], adj_relation: List[List[int]], time_stamps: int):
         """
         #! Neighbours are chosen once and don't change.
         
@@ -16,8 +19,11 @@ class KGCN(object):
             n_relation (int): numer of relations
             adj_entity (List[List[int]]): shape = [n_entity, neighbor_sample_size]
             adj_relation (List[List[int]]): shape = [n_relation, neighbor_sample_size]
+            time_stamps (int): How far into the past the model sees
         """
         self._parse_args(args, adj_entity, adj_relation)
+        self.time_stamps = time_stamps
+        self.LSTM = LSTM(self.dim)
         self._build_inputs()
         self._build_model(n_user, n_entity, n_relation)
         self._build_train()
@@ -48,41 +54,73 @@ class KGCN(object):
 
     def _build_inputs(self):
         #. Received in every pass through the feed_dict
-        self.user_indices = tf.placeholder(dtype=tf.int64, shape=[None], name='user_indices')
-        self.item_indices = tf.placeholder(dtype=tf.int64, shape=[None], name='item_indices')
-        self.labels = tf.placeholder(dtype=tf.float32, shape=[None], name='labels')
+
+        #. User indices of length equal to batch size
+        self.user_indices = tf.compat.v1.placeholder(dtype=tf.int64, shape=[None], name='user_indices')
+
+        #. Few last items each user has interacted with, shape = [batch_size, time_stamps, 1]
+        #. With the last item being the one the prediction is for
+        self.item_history = tf.compat.v1.placeholder(dtype=tf.int64, shape=[None, self.time_stamps], name='item_history')
+
+        # Label for the last item in item_history
+        self.labels = tf.compat.v1.placeholder(dtype=tf.float32, shape=[None], name='labels')
 
     def _build_model(self, n_user: int, n_entity: int, n_relation: int):
 
         #. Embedding for every single user of size self.dim
-        self.user_emb_matrix = tf.get_variable(
+        self.user_emb_matrix = tf.compat.v1.get_variable(
             shape=[n_user, self.dim], initializer=KGCN.get_initializer(), name='user_emb_matrix')
         #. Embedding for every single entity of size self.dim
-        self.entity_emb_matrix = tf.get_variable(
+        self.entity_emb_matrix = tf.compat.v1.get_variable(
             shape=[n_entity, self.dim], initializer=KGCN.get_initializer(), name='entity_emb_matrix')
         #. Embedding for every single relation of size self.dim
-        self.relation_emb_matrix = tf.get_variable(
+        self.relation_emb_matrix = tf.compat.v1.get_variable(
             shape=[n_relation, self.dim], initializer=KGCN.get_initializer(), name='relation_emb_matrix')
 
         #. Embeddings for every user in the batch [batch_size, dim]
         self.user_embeddings = tf.nn.embedding_lookup(self.user_emb_matrix, self.user_indices)
 
+        #! Forward pass through the network
+
         # entities is a list of i-iter (i = 0, 1, ..., n_iter) neighbors for the batch of items
         # dimensions of entities:
         # {[batch_size, 1], [batch_size, n_neighbor], [batch_size, n_neighbor^2], ..., [batch_size, n_neighbor^n_iter]}
-        entities, relations = self.get_neighbors(self.item_indices)
+        
+
+        history_embeddings = []
+
+        # [time_stamp, batch]
+        history = tf.transpose(self.item_history)
+
+        for i in range(self.time_stamps):
+
+            batch = history[i]
+            entities, relations = self.get_neighbors(batch)
+
+            print(len(entities))
+            print(len(relations))
+
+            # [batch_size, dim]
+            self.item_embeddings, self.aggregators = self.aggregate(entities, relations)
+
+            history_embeddings.append(self.item_embeddings)
+
+        # [time_steps, batch_size, dim]
+        stacked_embeddings = tf.stack(history_embeddings, axis=0)
+
+        # [batch_size, time_steps, dim]
+        stacked_embeddings = tf.transpose(stacked_embeddings, perm=[1, 0, 2])
 
         # [batch_size, dim]
-        self.item_embeddings, self.aggregators = self.aggregate(entities, relations)
+        self.lstm_output = self.LSTM(stacked_embeddings)
 
-        # [batch_size]
-        self.scores = tf.reduce_sum(self.user_embeddings * self.item_embeddings, axis=1)
+        # [batch_size, ]
+        self.scores = tf.reduce_sum(self.user_embeddings * self.lstm_output, axis=1)
         self.scores_normalized = tf.sigmoid(self.scores)
 
     def get_neighbors(self, seeds):
-        print(seeds.shape)
-        seeds = tf.expand_dims(seeds, axis=1)
         entities = [seeds]
+        seeds = tf.expand_dims(seeds, axis=1)
         relations = []
         for i in range(self.n_iter):
             neighbor_entities = tf.reshape(tf.gather(self.adj_entity, entities[i]), [self.batch_size, -1])
@@ -134,7 +172,7 @@ class KGCN(object):
         #. Final loss function
         self.loss = self.base_loss + self.l2_weight * self.l2_loss
 
-        self.optimizer = tf.train.AdamOptimizer(self.lr).minimize(self.loss)
+        self.optimizer = tf.compat.v1.train.AdamOptimizer(self.lr).minimize(self.loss)
 
     def train(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         return sess.run([self.optimizer, self.loss], feed_dict)
@@ -148,4 +186,4 @@ class KGCN(object):
         return auc, f1
 
     def get_scores(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
-        return sess.run([self.item_indices, self.scores_normalized], feed_dict)
+        return sess.run([self.item_history, self.scores_normalized], feed_dict)

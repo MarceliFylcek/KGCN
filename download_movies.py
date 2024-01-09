@@ -46,4 +46,4 @@ if __name__ == "__main__":
     print(f"Unpacking file {file_name}")
     extract(file_name)
 
-    shutil.move("ml-20m/ml-20m/ratings.csv", "data/movie/")
+    shutil.move("resources/ml-20m/ml-20m/ratings.csv", "data/movie/")
