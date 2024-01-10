@@ -1,6 +1,8 @@
 import tensorflow as tf
 import numpy as np
 from model import KGCN
+import matplotlib.pyplot as plt
+from sklearn.metrics import auc, roc_curve
 
 
 def train(args, data, show_loss, show_topk):
@@ -28,9 +30,20 @@ def train(args, data, show_loss, show_topk):
                     print(start, loss)
 
             # CTR evaluation
-            train_auc, train_f1 = ctr_eval(sess, model, train_data, args.batch_size)
-            eval_auc, eval_f1 = ctr_eval(sess, model, eval_data, args.batch_size)
-            test_auc, test_f1 = ctr_eval(sess, model, test_data, args.batch_size)
+            train_auc, train_f1, _, _ = ctr_eval(sess, model, train_data, args.batch_size)
+            eval_auc, eval_f1, _, _ = ctr_eval(sess, model, eval_data, args.batch_size)
+            test_auc, test_f1, labels, scores= ctr_eval(sess, model, test_data, args.batch_size)
+            fpr, tpr, thresholds = roc_curve(y_true=labels, y_score=scores)
+
+            roc_auc = auc(fpr, tpr)
+
+            plt.figure()
+            plt.plot(fpr, tpr, color='darkorange', lw=2, label='Krzywa ROC (AUC = {:.2f})'.format(roc_auc))
+            plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Losowy model')
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title('Krzywa ROC')
+            plt.show()
 
             print('epoch %d    train auc: %.4f  f1: %.4f    eval auc: %.4f  f1: %.4f    test auc: %.4f  f1: %.4f'
                   % (step, train_auc, train_f1, eval_auc, eval_f1, test_auc, test_f1))
@@ -75,12 +88,19 @@ def ctr_eval(sess, model, data, batch_size):
     start = 0
     auc_list = []
     f1_list = []
+    labels_list = []
+    scores_list = []
     while start + batch_size <= data.shape[0]:
-        auc, f1 = model.eval(sess, get_feed_dict(model, data, start, start + batch_size))
+        auc, f1, labels, scores = model.eval(sess, get_feed_dict(model, data, start, start + batch_size))
         auc_list.append(auc)
         f1_list.append(f1)
+        labels_list.append(labels)
+        scores_list.append(scores)
         start += batch_size
-    return float(np.mean(auc_list)), float(np.mean(f1_list))
+    labels_array = np.array(labels_list).flatten()
+    scores_array = np.array(scores_list).flatten()
+
+    return float(np.mean(auc_list)), float(np.mean(f1_list)), labels_array, scores_array
 
 
 def topk_eval(sess, model, user_list, train_record, test_record, item_set, k_list, batch_size):

@@ -1,5 +1,8 @@
 import argparse
 import numpy as np
+import os
+import progressbar
+
 
 RATING_FILE_NAME = dict({'movie': 'ratings.csv', 'book': 'BX-Book-Ratings.csv', 'music': 'user_artists.dat'})
 SEP = dict({'movie': ',', 'book': ';', 'music': '\t'})
@@ -19,17 +22,23 @@ def read_item_index_to_entity_id_file():
 
 
 def convert_rating():
-    file = '../data/' + DATASET + '/' + RATING_FILE_NAME[DATASET]
+    input_file = '../data/' + DATASET + '/' + RATING_FILE_NAME[DATASET]
+    output_file = '../data/' + DATASET + '/' + 'rating_timestamp_normalized.csv'
+
+    if DATASET == "movie":
+        normalize_timestamp(input_file, output_file)
+        
 
     print('reading rating file ...')
     item_set = set(item_index_old2new.values())
     user_pos_ratings = dict()
     user_neg_ratings = dict()
 
-    for line in open(file, encoding='utf-8').readlines()[1:]:
+    for line in open(output_file, encoding='utf-8').readlines()[1:]:
         array = line.strip().split(SEP[DATASET])
 
-        timestamp = array[3]
+        if DATASET == 'movie':
+            timestamp = array[3]
         # remove prefix and suffix quotation marks for BX dataset
         if DATASET == 'book':
             array = list(map(lambda x: x[1:-1], array))
@@ -67,6 +76,7 @@ def convert_rating():
             user_cnt += 1
         user_index = user_index_old2new[user_index_old]
 
+
         for item in pos_item_set:
             if DATASET == 'movie':
                 item_id, timestamp = item
@@ -74,15 +84,51 @@ def convert_rating():
             else:
                 writer.write('%d\t%d\t1\n' % (user_index, item))
         unwatched_set = item_set - pos_item_set
+
         if user_index_old in user_neg_ratings:
+            user_neg_items = user_neg_ratings[user_index_old]
+            neg_items_cnt = len(user_neg_items) # number of negative items
+            pos_items_cnt = len(pos_item_set)
+
+            number_of_items = pos_items_cnt if neg_items_cnt > pos_items_cnt else neg_items_cnt
+
+            for i in range(number_of_items): # pick the same amount of negative records, random, if there are more negative records than positive
+                rand = np.random.randint(low=0, high=len(user_neg_items))
+                item = list(user_neg_items)[rand]
+
+                if DATASET == 'movie':
+                    item_id, timestamp = item
+                    writer.write('%d\t%d\t1\t%s\n' % (user_index, item_id, timestamp))
+                else:
+                    writer.write('%d\t%d\t1\n' % (user_index, item))
+
             unwatched_set -= user_neg_ratings[user_index_old] # from all items set, remove the negative rating films
+        
         for item in np.random.choice(list(unwatched_set), size=len(pos_item_set), replace=False):
-            # only the movies which has not been watched by the user, are left
-            #if DATASET == 'movie':
-            #    item_id, timestamp = item
-            #   writer.write('%d\t%d\t1\t%d\n' % (user_index, item_id, timestamp))
-            #else:
-            writer.write('%d\t%d\t0\t-1\n' % (user_index, item))
+            # only the items which has not been interacted with by the user, are left
+            if DATASET == 'movie':
+                writer.write('%d\t%d\t0\t-1\n' % (user_index, item))
+            else:
+                writer.write('%d\t%d\t0\n' % (user_index, item))
+
+    '''
+    for user_index_old, neg_item_set in user_neg_ratings.items():
+        if user_index_old not in user_index_old2new:
+            user_index_old2new[user_index_old] = user_cnt
+            user_cnt += 1
+        user_index = user_index_old2new[user_index_old]
+
+        neg_item_cnt = 0
+        for item in neg_item_set:
+            
+            if DATASET == 'movie':
+                item_id, timestamp = item
+                writer.write('%d\t%d\t0\t%s\n' % (user_index, item_id, timestamp))
+            else:
+                writer.write('%d\t%d\t0\n' % (user_index, item))
+            neg_item_cnt += 1
+    '''
+
     writer.close()
     print('number of users: %d' % user_cnt)
     print('number of items: %d' % len(item_set))
@@ -122,6 +168,49 @@ def convert_kg():
     print('number of relations: %d' % relation_cnt)
 
 
+def normalize_timestamp(input_file_path, output_file_path):    
+    print("Reading lines from file.....")
+    with open(input_file_path, encoding='utf-8') as file:
+        lines = file.readlines()[1:]
+
+        min_user_timestamps = {}  # Dictionary to store minimum timestamp for each user
+        arrays = []
+
+        lines_cnt = len(lines)
+
+        for line in lines:
+            array = line.strip().split(SEP[DATASET])
+            userId = int(array[0])
+            timestamp = int(array[3])
+
+            if userId not in min_user_timestamps:
+                min_user_timestamps[userId] = timestamp
+            else:
+                min_user_timestamps[userId] = min(min_user_timestamps[userId], timestamp)
+
+            arrays.append(array)
+
+        # Write normalized timestamps and other data
+        os.system('cls')
+        write_normalized_data(output_file_path, arrays, min_user_timestamps, lines_cnt)
+
+
+def write_normalized_data(output_file, arrays, user_timestamps, lines_cnt):
+    bar = progressbar.ProgressBar(maxval=lines_cnt, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
+    bar.start()
+
+    with open(output_file, 'a', encoding='utf-8') as writer:
+        writer.write('userId,movieId,rating,timestamp\n')
+        for i, array in enumerate(arrays):
+            bar.update(i + 1)
+            user_id = int(array[0])
+            writer.write('%d,%d,%.1f,%d\n' % (user_id, int(array[1]), float(array[2]), int(array[3]) - user_timestamps[user_id]))
+    bar.finish()
+    os.system('cls')
+    print("Finished normalizing the timestamp column")
+
+
+
 if __name__ == '__main__':
     np.random.seed(555)
 
@@ -139,3 +228,5 @@ if __name__ == '__main__':
     convert_kg()
 
     print('done')
+
+

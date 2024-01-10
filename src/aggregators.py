@@ -134,3 +134,28 @@ class NeighborAggregator(Aggregator):
         output = tf.reshape(output, [self.batch_size, -1, self.dim])
 
         return self.act(output)
+
+
+class MultiplyAggregator(Aggregator):
+    def __init__(self, batch_size, dim, dropout=0., act=tf.nn.relu, name=None):
+        super(MultiplyAggregator, self).__init__(batch_size, dim, dropout, act, name)
+
+        with tf.variable_scope(self.name):
+            self.weights = tf.get_variable(
+                shape=[self.dim, self.dim], initializer=tf.contrib.layers.xavier_initializer(), name='weights')
+            self.bias = tf.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
+
+    def _call(self, self_vectors, neighbor_vectors, neighbor_relations, user_embeddings):
+        # [batch_size, -1, dim]
+        neighbors_agg = self._mix_neighbor_vectors(neighbor_vectors, neighbor_relations, user_embeddings)
+
+        # [-1, dim]
+        output = tf.math.multiply(self_vectors, neighbors_agg)
+        output = tf.reshape(output, [-1, self.dim])
+        output = tf.nn.dropout(output, keep_prob=1-self.dropout)
+        output = tf.matmul(output, self.weights) + self.bias
+
+        # [batch_size, -1, dim]
+        output = tf.reshape(output, [self.batch_size, -1, self.dim])
+
+        return self.act(output)
