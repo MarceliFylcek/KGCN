@@ -1,11 +1,12 @@
 import tensorflow as tf
-from aggregators import SumAggregator, ConcatAggregator, NeighborAggregator
-from sklearn.metrics import f1_score, roc_auc_score
+from aggregators import SumAggregator, ConcatAggregator, NeighborAggregator, MultiplyAggregator
+from sklearn.metrics import f1_score, roc_auc_score, roc_curve
 from typing import List, Dict
 from tensorflow.keras.layers import LSTM
 import numpy as np
 import sys
 from LSTM import CustomLSTM
+
 
 class KGCN(object):
     def __init__(self, args, n_user: int, n_entity: int, n_relation: int, adj_entity: List[List[int]], adj_relation: List[List[int]]):
@@ -51,6 +52,8 @@ class KGCN(object):
             self.aggregator_class = ConcatAggregator
         elif args.aggregator == 'neighbor':
             self.aggregator_class = NeighborAggregator
+        elif args.aggregator == 'mul':
+            self.aggregator_class = MultiplyAggregator
         else:
             raise Exception("Unknown aggregator: " + args.aggregator)
 
@@ -179,11 +182,14 @@ class KGCN(object):
 
     def eval(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         labels, scores = sess.run([self.labels, self.scores_normalized], feed_dict)
+        labels_2 = np.copy(labels).tolist()
+        scores_2 = np.copy(scores).tolist()
+        #fpr, tpr, thresholds = roc_curve(y_true=labels, y_score=scores)
         auc = roc_auc_score(y_true=labels, y_score=scores)
         scores[scores >= 0.5] = 1
         scores[scores < 0.5] = 0
         f1 = f1_score(y_true=labels, y_pred=scores)
-        return auc, f1
+        return auc, f1, labels_2, scores_2
 
     def get_scores(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         return sess.run([self.item_history, self.scores_normalized], feed_dict)
