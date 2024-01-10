@@ -10,6 +10,12 @@ def train(args, data, show_loss, show_topk):
     train_data, eval_data, test_data = data[4], data[5], data[6]
     adj_entity, adj_relation = data[7], data[8]
 
+    train_data = sort_by_time_stamp(train_data)
+    eval_data = sort_by_time_stamp(eval_data) 
+    test_data = sort_by_time_stamp(test_data)
+
+    time_stamps = args.time_stamps
+
     # All items and relations passed
     model = KGCN(args, n_user, n_entity, n_relation, adj_entity, adj_relation)
 
@@ -20,31 +26,34 @@ def train(args, data, show_loss, show_topk):
         sess.run(tf.compat.v1.global_variables_initializer())
 
         for step in range(args.n_epochs):
-            # training
-            np.random.shuffle(train_data)
-            start = 1
+            
+            shuffled_train_data = get_shuffled_copy(train_data)
+            shuffled_eval_data = get_shuffled_copy(eval_data)
+            shuffled_test_data = get_shuffled_copy(test_data)
+
+            start = 0
             # skip the last incomplete minibatch if its size < batch size
-            while start + args.batch_size <= train_data.shape[0]:
-                _, loss = model.train(sess, get_feed_dict(model, train_data, start, start + args.batch_size))
+            while start + args.batch_size <= shuffled_train_data.shape[0]:
+                _, loss = model.train(sess, get_feed_dict(model, shuffled_train_data, train_data, time_stamps, start, start + args.batch_size))
                 start += args.batch_size
                 if show_loss:
                     print(start, loss)
 
             # CTR evaluation
-            train_auc, train_f1, _, _ = ctr_eval(sess, model, train_data, args.batch_size)
-            eval_auc, eval_f1, _, _ = ctr_eval(sess, model, eval_data, args.batch_size)
-            test_auc, test_f1, labels, scores= ctr_eval(sess, model, test_data, args.batch_size)
-            fpr, tpr, thresholds = roc_curve(y_true=labels, y_score=scores)
+            train_auc, train_f1, _, _ = ctr_eval(sess, model, shuffled_train_data, train_data, time_stamps, args.batch_size)
+            eval_auc, eval_f1, _, _ = ctr_eval(sess, model, shuffled_eval_data, eval_data, time_stamps, args.batch_size)
+            test_auc, test_f1, labels, scores= ctr_eval(sess, model, shuffled_test_data, test_data, time_stamps, args.batch_size)
+            # fpr, tpr, thresholds = roc_curve(y_true=labels, y_score=scores)
 
-            roc_auc = auc(fpr, tpr)
+            # roc_auc = auc(fpr, tpr)
 
-            plt.figure()
-            plt.plot(fpr, tpr, color='darkorange', lw=2, label='Krzywa ROC (AUC = {:.2f})'.format(roc_auc))
-            plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Losowy model')
-            plt.xlabel('False Positive Rate')
-            plt.ylabel('True Positive Rate')
-            plt.title('Krzywa ROC')
-            plt.show()
+            # plt.figure()
+            # plt.plot(fpr, tpr, color='darkorange', lw=2, label='Krzywa ROC (AUC = {:.2f})'.format(roc_auc))
+            # plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Losowy model')
+            # plt.xlabel('False Positive Rate')
+            # plt.ylabel('True Positive Rate')
+            # plt.title('Krzywa ROC')
+            # plt.show()
 
             print('epoch %d    train auc: %.4f  f1: %.4f    eval auc: %.4f  f1: %.4f    test auc: %.4f  f1: %.4f'
                  % (step, train_auc, train_f1, eval_auc, eval_f1, test_auc, test_f1))
@@ -78,25 +87,79 @@ def topk_settings(show_topk, train_data, test_data, n_item):
         return [None] * 5
 
 
-def get_feed_dict(model: KGCN, data, start: int, end: int):
-    #! dummy data
-    history = np.stack([data[start-1:end-1, 1], data[start:end, 1]], axis=0)
-    #history = np.expand_dims(data[start:end, 1], axis=0)
-    history = np.transpose(history)
+def get_feed_dict(model: KGCN, data, data_sorted, time_stamps, start: int, end: int):
+    history = get_history(data[start:end], data_sorted, time_stamps)
+
     feed_dict = {model.user_indices: data[start:end, 0],
                  model.item_history: history,
                  model.labels: data[start:end, 2]}
     return feed_dict
 
+def get_history(data, data_sorted, n_time_stamps):
+    histories = []
+    for instance in data:
+        history = []
+        user_id = instance[0]
+        time_stamp = instance[3]
+        id = instance[4]
 
-def ctr_eval(sess, model, data, batch_size):
+        # Last n_time_stamps
+        if time_stamp != -1:
+            last_existing_index = 0
+            for i in range(n_time_stamps):
+                # Check for out of bound index
+                if id-i >= 0 and user_id == data_sorted[id-i][0]:
+                    history.append(data_sorted[id-i][1])
+                    last_existing_index = i
+                # No more instances
+                else:
+                    history.append(data_sorted[id-last_existing_index][1])
+
+        # No timestamp, get the newest products
+        else:
+
+            history.append(data_sorted[id][1])
+
+            data_len = len(data_sorted)
+            current_user = user_id
+            current_index = id
+
+            # Search for the newest product
+            while(current_index < data_len-1):
+                current_index += 1
+                current_user = data_sorted[current_index][0]
+
+                if current_user != user_id:
+                    current_index -= 1
+                    break
+
+            last_existing_index = 0
+            for i in range(n_time_stamps-1):
+                # Check for out of bound index
+                if id-i >= 0 and user_id == data_sorted[id-i][0]:
+                    history.append(data_sorted[id-i][1])
+                    last_existing_index = i
+                # No more instances
+                else:
+                    history.append(data_sorted[id-last_existing_index][1])
+
+        history.reverse()
+        histories.append(history)
+            
+
+    final_history = np.stack(histories, axis=0)
+    #history = np.expand_dims(data[start:end, 1], axis=0)
+    # final_history = np.transpose(final_history)
+    return final_history
+
+def ctr_eval(sess, model, data, data_sorted, time_stamps, batch_size):
     start = 1
     auc_list = []
     f1_list = []
     labels_list = []
     scores_list = []
     while start + batch_size <= data.shape[0]:
-        auc, f1, labels, scores = model.eval(sess, get_feed_dict(model, data, start, start + batch_size))
+        auc, f1, labels, scores = model.eval(sess, get_feed_dict(model, data, data_sorted, time_stamps, start, start + batch_size))
         auc_list.append(auc)
         f1_list.append(f1)
         labels_list.append(labels)
@@ -157,3 +220,20 @@ def get_user_record(data, is_train):
                 user_history_dict[user] = set()
             user_history_dict[user].add(item)
     return user_history_dict
+
+def sort_by_time_stamp(data):
+    sorted_indices = np.lexsort((data[:, 3], data[:, 0]))
+    sorted_data = data[sorted_indices]
+
+    # Add index column
+    indices = np.arange(len(sorted_data))
+    sorted_data = np.column_stack([sorted_data, indices])
+
+    return sorted_data
+
+def get_shuffled_copy(data):
+    n_instances = data.shape[0]
+    random_indices = np.random.permutation(n_instances)
+    shuffled_data = data[random_indices]
+
+    return shuffled_data

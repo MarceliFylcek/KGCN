@@ -98,9 +98,9 @@ def convert_rating():
 
                 if DATASET == 'movie':
                     item_id, timestamp = item
-                    writer.write('%d\t%d\t1\t%s\n' % (user_index, item_id, timestamp))
+                    writer.write('%d\t%d\t0\t%s\n' % (user_index, item_id, timestamp))
                 else:
-                    writer.write('%d\t%d\t1\n' % (user_index, item))
+                    writer.write('%d\t%d\t0\n' % (user_index, item))
 
             unwatched_set -= user_neg_ratings[user_index_old] # from all items set, remove the negative rating films
         
@@ -196,6 +196,7 @@ def normalize_timestamp(input_file_path, output_file_path):
 
 
 def write_normalized_data(output_file, arrays, user_timestamps, lines_cnt):
+    print("Lines to write:", lines_cnt)
     bar = progressbar.ProgressBar(maxval=lines_cnt, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
     bar.start()
 
@@ -228,5 +229,3 @@ if __name__ == '__main__':
     convert_kg()
 
     print('done')
-
-

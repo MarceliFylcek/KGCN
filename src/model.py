@@ -114,8 +114,7 @@ class KGCN(object):
         
         lstm_output = self.lstm(stacked_embeddings)
 
-        self.scores = tf.reduce_sum(self.user_embeddings * lstm_output, axis=1)
-        print(self.scores.shape)
+        self.scores = tf.reduce_sum(self.user_embeddings * (self.item_embeddings * lstm_output), axis=1)
         self.scores_normalized = tf.sigmoid(self.scores)
 
     def get_neighbors(self, seeds):
