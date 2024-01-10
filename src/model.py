@@ -1,12 +1,31 @@
 import tensorflow as tf
 from aggregators import SumAggregator, ConcatAggregator, NeighborAggregator, MultiplyAggregator
 from sklearn.metrics import f1_score, roc_auc_score, roc_curve
+from typing import List, Dict
+from tensorflow.keras.layers import LSTM
 import numpy as np
+import sys
+from LSTM import CustomLSTM
 
 
 class KGCN(object):
-    def __init__(self, args, n_user, n_entity, n_relation, adj_entity, adj_relation):
+    def __init__(self, args, n_user: int, n_entity: int, n_relation: int, adj_entity: List[List[int]], adj_relation: List[List[int]]):
+        """
+        #! Neighbours are chosen once and don't change.
+        
+        Args:
+            args (_type_): Input arguments
+            n_user (int): number of users
+            n_entity (int): number of entities
+            n_relation (int): numer of relations
+            adj_entity (List[List[int]]): shape = [n_entity, neighbor_sample_size]
+            adj_relation (List[List[int]]): shape = [n_relation, neighbor_sample_size]
+            time_stamps (int): How far into the past the model sees
+        """
         self._parse_args(args, adj_entity, adj_relation)
+
+        self.lstm = CustomLSTM(input_size=self.dim, hidden_size=self.dim)
+
         self._build_inputs()
         self._build_model(n_user, n_entity, n_relation)
         self._build_train()
@@ -20,6 +39,7 @@ class KGCN(object):
         self.adj_entity = adj_entity
         self.adj_relation = adj_relation
 
+        self.time_stamps = args.time_stamps
         self.n_iter = args.n_iter
         self.batch_size = args.batch_size
         self.n_neighbor = args.neighbor_sample_size
@@ -38,35 +58,64 @@ class KGCN(object):
             raise Exception("Unknown aggregator: " + args.aggregator)
 
     def _build_inputs(self):
-        self.user_indices = tf.placeholder(dtype=tf.int64, shape=[None], name='user_indices')
-        self.item_indices = tf.placeholder(dtype=tf.int64, shape=[None], name='item_indices')
-        self.labels = tf.placeholder(dtype=tf.float32, shape=[None], name='labels')
+        #. Received in every pass through the feed_dict
 
-    def _build_model(self, n_user, n_entity, n_relation):
-        self.user_emb_matrix = tf.get_variable(
+        #. User indices of length equal to batch size
+        self.user_indices = tf.compat.v1.placeholder(dtype=tf.int64, shape=[None], name='user_indices')
+
+        #. Few last items each user has interacted with, shape = [batch_size, time_stamps, 1]
+        #. With the last item being the one the prediction is for
+        self.item_history = tf.compat.v1.placeholder(dtype=tf.int64, shape=[None, self.time_stamps], name='item_history')
+
+        # Label for the last item in item_history
+        self.labels = tf.compat.v1.placeholder(dtype=tf.float32, shape=[None], name='labels')
+
+    def _build_model(self, n_user: int, n_entity: int, n_relation: int):
+
+        #. Embedding for every single user of size self.dim
+        self.user_emb_matrix = tf.compat.v1.get_variable(
             shape=[n_user, self.dim], initializer=KGCN.get_initializer(), name='user_emb_matrix')
-        self.entity_emb_matrix = tf.get_variable(
+        #. Embedding for every single entity of size self.dim
+        self.entity_emb_matrix = tf.compat.v1.get_variable(
             shape=[n_entity, self.dim], initializer=KGCN.get_initializer(), name='entity_emb_matrix')
-        self.relation_emb_matrix = tf.get_variable(
+        #. Embedding for every single relation of size self.dim
+        self.relation_emb_matrix = tf.compat.v1.get_variable(
             shape=[n_relation, self.dim], initializer=KGCN.get_initializer(), name='relation_emb_matrix')
 
-        # [batch_size, dim]
+        #. Embeddings for every user in the batch [batch_size, dim]
         self.user_embeddings = tf.nn.embedding_lookup(self.user_emb_matrix, self.user_indices)
 
-        # entities is a list of i-iter (i = 0, 1, ..., n_iter) neighbors for the batch of items
-        # dimensions of entities:
-        # {[batch_size, 1], [batch_size, n_neighbor], [batch_size, n_neighbor^2], ..., [batch_size, n_neighbor^n_iter]}
-        entities, relations = self.get_neighbors(self.item_indices)
-        print("!!!!!")
-        print(entities.shape)
-        print(relations.shape)
-        print("!!!!!")
+        #! Forward pass through the network
 
-        # [batch_size, dim]
-        self.item_embeddings, self.aggregators = self.aggregate(entities, relations)
+        history_embeddings = []
 
-        # [batch_size]
-        self.scores = tf.reduce_sum(self.user_embeddings * self.item_embeddings, axis=1)
+        # [time_stamp, batch]
+        history = tf.transpose(self.item_history)
+
+        for i in range(self.time_stamps):
+
+            batch = history[i]
+
+            # entities is a list of i-iter (i = 0, 1, ..., n_iter) neighbors for the batch of items
+            # dimensions of entities:
+            # {[batch_size, 1], [batch_size, n_neighbor], [batch_size, n_neighbor^2], ..., [batch_size, n_neighbor^n_iter]}
+            entities, relations = self.get_neighbors(batch)
+
+            # [batch_size, dim]
+            self.item_embeddings, self.aggregators = self.aggregate(entities, relations)
+
+            history_embeddings.append(self.item_embeddings)
+
+        # [time_steps, batch_size, dim]
+        stacked_embeddings = tf.stack(history_embeddings, axis=0)
+
+        # [batch_size, time_steps, dim]
+        stacked_embeddings = tf.transpose(stacked_embeddings, perm=[1, 0, 2])
+        
+        lstm_output = self.lstm(stacked_embeddings)
+
+        self.scores = tf.reduce_sum(self.user_embeddings * lstm_output, axis=1)
+        print(self.scores.shape)
         self.scores_normalized = tf.sigmoid(self.scores)
 
     def get_neighbors(self, seeds):
@@ -102,26 +151,36 @@ class KGCN(object):
                 entity_vectors_next_iter.append(vector)
             entity_vectors = entity_vectors_next_iter
 
-        res = tf.reshape(entity_vectors[0], [self.batch_size, self.dim])
+            res = tf.reshape(entity_vectors[0], [self.batch_size, self.dim])
 
         return res, aggregators
 
     def _build_train(self):
+
+        #. Cross-entropy between labels and scores
         self.base_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
             labels=self.labels, logits=self.scores))
 
+        #. L2-loss for the embeddings
         self.l2_loss = tf.nn.l2_loss(self.user_emb_matrix) + tf.nn.l2_loss(
             self.entity_emb_matrix) + tf.nn.l2_loss(self.relation_emb_matrix)
+        
+        lstm_weights = self.lstm.trainable_weights
+        lstm_l2_loss = tf.add_n([tf.nn.l2_loss(w) for w in lstm_weights])
+
+        # L2-loss for the aggregator weights
         for aggregator in self.aggregators:
             self.l2_loss = self.l2_loss + tf.nn.l2_loss(aggregator.weights)
-        self.loss = self.base_loss + self.l2_weight * self.l2_loss
 
-        self.optimizer = tf.train.AdamOptimizer(self.lr).minimize(self.loss)
+        #. Final loss function
+        self.loss = self.base_loss + self.l2_weight * self.l2_loss + lstm_l2_loss
 
-    def train(self, sess, feed_dict):
+        self.optimizer = tf.compat.v1.train.AdamOptimizer(self.lr).minimize(self.loss)
+
+    def train(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         return sess.run([self.optimizer, self.loss], feed_dict)
 
-    def eval(self, sess, feed_dict):
+    def eval(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
         labels, scores = sess.run([self.labels, self.scores_normalized], feed_dict)
         labels_2 = np.copy(labels).tolist()
         scores_2 = np.copy(scores).tolist()
@@ -132,5 +191,5 @@ class KGCN(object):
         f1 = f1_score(y_true=labels, y_pred=scores)
         return auc, f1, labels_2, scores_2
 
-    def get_scores(self, sess, feed_dict):
-        return sess.run([self.item_indices, self.scores_normalized], feed_dict)
+    def get_scores(self, sess, feed_dict: Dict[List[List[int]], List[List[int]]]):
+        return sess.run([self.item_history, self.scores_normalized], feed_dict)
